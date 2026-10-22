@@ -53,6 +53,7 @@ class DeliveromeSource:
         self.api_base = api_base.rstrip("/")
         self._owns_client = client is None
         self.client = client or PacedClient(cache_dir=cache_dir)
+        self._catalog_by_symbol: dict[str, CatalogRow] | None = None
 
     def close(self) -> None:
         if self._owns_client:
@@ -69,18 +70,48 @@ class DeliveromeSource:
     def index(self) -> dict[str, Any]:
         return self.client.get_json(self.api_base)
 
+    def genes_index(self, *, refresh: bool = False) -> dict[str, Any]:
+        cache_key = self._prepare_cache("deliverome/genes_index.json", refresh=refresh)
+        return self.client.get_json(f"{self.api_base}/genes", cache_key=cache_key)
+
+    def benchmark(self, *, refresh: bool = False) -> dict[str, Any]:
+        cache_key = self._prepare_cache("deliverome/benchmark.json", refresh=refresh)
+        return self.client.get_json(f"{self.api_base}/benchmark", cache_key=cache_key)
+
+    def benchmark_gene(self, symbol: str) -> dict[str, Any] | None:
+        sym = symbol.strip().upper()
+        return self._get_or_none(
+            f"{self.api_base}/benchmark/{sym}",
+            cache_key=f"deliverome/benchmark/{sym}.json",
+        )
+
+    def benchmark_matrix(self, *, refresh: bool = False) -> dict[str, Any]:
+        cache_key = self._prepare_cache("deliverome/benchmark_matrix.json", refresh=refresh)
+        return self.client.get_json(f"{self.api_base}/benchmark/matrix", cache_key=cache_key)
+
+    def triage(self, symbol: str) -> dict[str, Any] | None:
+        sym = symbol.strip().upper()
+        return self._get_or_none(
+            f"{self.api_base}/triage/{sym}",
+            cache_key=f"deliverome/triage/{sym}.json",
+        )
+
+    def triage_cell(self, symbol: str, model: str, variant: str) -> dict[str, Any] | None:
+        sym = symbol.strip().upper()
+        return self._get_or_none(
+            f"{self.api_base}/triage/{sym}/{model}/{variant}",
+            cache_key=f"deliverome/triage/{sym}_{model}_{variant}.json",
+        )
+
     def catalog(self, *, refresh: bool = False) -> CatalogSnapshot:
-        cache_key = None if refresh else "deliverome/catalog.json"
-        if refresh and self.client.cache_dir:
-            cached = self.client.cache_dir / "deliverome" / "catalog.json"
-            if cached.exists():
-                cached.unlink()
+        cache_key = self._prepare_cache("deliverome/catalog.json", refresh=refresh)
         payload = self.client.get_json(f"{self.api_base}/catalog", cache_key=cache_key)
         db_keys = tuple(payload.get("db_keys") or DEFAULT_DB_KEYS)
         rows = [
             _normalize_catalog_row(raw, db_keys=db_keys)
             for raw in payload.get("rows") or []
         ]
+        self._catalog_by_symbol = {r.symbol.upper(): r for r in rows}
         version = {
             "universe_version": payload.get("universe_version"),
             "bench_version": payload.get("bench_version"),
@@ -96,14 +127,24 @@ class DeliveromeSource:
             raw_meta=meta,
         )
 
-    def gene(self, symbol: str, *, include: Sequence[Include] = ("record",)) -> GeneBundle | None:
-        symbol = symbol.strip()
+    def gene(
+        self,
+        symbol: str,
+        *,
+        include: Sequence[Include] = ("record",),
+        catalog_row: CatalogRow | None = None,
+    ) -> GeneBundle | None:
+        symbol = symbol.strip().upper()
         wanted = set(include) or {"record"}
-        catalog_row = self._catalog_gene(symbol)
+        if catalog_row is None:
+            catalog_row = self._catalog_gene(symbol)
 
         record: dict[str, Any] | None = None
         if "record" in wanted:
-            record = self._get_or_none(f"{self.api_base}/genes/{symbol}")
+            record = self._get_or_none(
+                f"{self.api_base}/genes/{symbol}",
+                cache_key=f"deliverome/genes/{symbol}.json",
+            )
             if record is None and catalog_row is None:
                 return None
 
@@ -115,15 +156,27 @@ class DeliveromeSource:
             record=record,
         )
         if "evidence" in wanted:
-            bundle.evidence = self._get_or_none(f"{self.api_base}/genes/{symbol}/evidence")
+            bundle.evidence = self._get_or_none(
+                f"{self.api_base}/genes/{symbol}/evidence",
+                cache_key=f"deliverome/evidence/{symbol}.json",
+            )
         if "tag_sites" in wanted:
-            bundle.tag_sites = self._get_or_none(f"{self.api_base}/tag-sites/{symbol}")
+            bundle.tag_sites = self._get_or_none(
+                f"{self.api_base}/tag-sites/{symbol}",
+                cache_key=f"deliverome/tag-sites/{symbol}.json",
+            )
         if "internalization" in wanted:
-            bundle.internalization = self._get_or_none(f"{self.api_base}/internalization/{symbol}")
+            bundle.internalization = self._get_or_none(
+                f"{self.api_base}/internalization/{symbol}",
+                cache_key=f"deliverome/internalization/{symbol}.json",
+            )
         if "orthologs" in wanted:
-            bundle.orthologs = self._get_or_none(f"{self.api_base}/orthologs/{symbol}")
+            bundle.orthologs = self._get_or_none(
+                f"{self.api_base}/orthologs/{symbol}",
+                cache_key=f"deliverome/orthologs/{symbol}.json",
+            )
         if "triage" in wanted:
-            bundle.triage = self._get_or_none(f"{self.api_base}/triage/{symbol}")
+            bundle.triage = self.triage(symbol)
         if "markdown" in wanted:
             try:
                 bundle.markdown = self.client.get_text(f"{self.api_base}/genes/{symbol}.md")
@@ -136,6 +189,8 @@ class DeliveromeSource:
             and bundle.catalog is None
             and bundle.tag_sites is None
             and bundle.internalization is None
+            and bundle.triage is None
+            and bundle.orthologs is None
         ):
             return None
         return bundle
@@ -149,10 +204,8 @@ class DeliveromeSource:
         genes: list[GeneBundle] = []
         if query.include:
             for row in matched:
-                bundle = self.gene(row.symbol, include=query.include)
+                bundle = self.gene(row.symbol, include=query.include, catalog_row=row)
                 if bundle is not None:
-                    if bundle.catalog is None:
-                        bundle.catalog = row
                     genes.append(bundle)
 
         return MineResult(
@@ -166,14 +219,32 @@ class DeliveromeSource:
         )
 
     def _catalog_gene(self, symbol: str) -> CatalogRow | None:
-        raw = self._get_or_none(f"{self.api_base}/catalog/{symbol}")
+        sym = symbol.upper()
+        if self._catalog_by_symbol is not None:
+            return self._catalog_by_symbol.get(sym)
+        if self.client.cache_dir and (self.client.cache_dir / "deliverome" / "catalog.json").is_file():
+            self.catalog(refresh=False)
+            if self._catalog_by_symbol is not None:
+                return self._catalog_by_symbol.get(sym)
+        raw = self._get_or_none(
+            f"{self.api_base}/catalog/{sym}",
+            cache_key=f"deliverome/catalog/{sym}.json",
+        )
         if raw is None:
             return None
         return _normalize_catalog_row(raw, db_keys=DEFAULT_DB_KEYS)
 
-    def _get_or_none(self, url: str) -> Any:
+    def _prepare_cache(self, cache_key: str, *, refresh: bool) -> str | None:
+        if refresh and self.client.cache_dir:
+            cached = self.client.cache_dir / cache_key
+            if cached.exists():
+                cached.unlink()
+            return None
+        return cache_key
+
+    def _get_or_none(self, url: str, *, cache_key: str | None = None) -> Any:
         try:
-            return self.client.get_json(url)
+            return self.client.get_json(url, cache_key=cache_key)
         except SourceHttpError as exc:
             if exc.status == 404:
                 return None

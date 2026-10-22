@@ -53,15 +53,35 @@ surfaceome-mine health
 surfaceome-mine catalog --preset canonical --min-db-votes 3 --cache-dir .cache
 surfaceome-mine gene ERBB2 --include record,tag_sites,internalization
 surfaceome-mine mine --preset canonical --min-surface-bind-sites 1 --limit 25 -o shortlist.json
+
+# Deep-dive a custom candidate list (accepts HGNC or mouse-cased 'Symbol (category)' labels)
+surfaceome-mine deep-dive --symbols "Pik3ip1 (cell_surface),Slc2a4 (receptor),Them4 (plasma_membrane)" --cache-dir .cache
+
+# Score the 147-gene SurfaceBench multi-model benchmark (Claude Haiku / Sonnet / Opus)
+surfaceome-mine benchmark --cache-dir .cache
+
+# Fetch precomputed Deliverome Claude triage runs or run live Claude Sonnet/Opus triage
+surfaceome-mine triage PIK3IP1 SLC2A4 THEM4 --cache-dir .cache
+ANTHROPIC_API_KEY=... surfaceome-mine triage SLC2A4 --run-llm --model claude-sonnet-4-6 --variant ncbi --context "simulated ischemia"
 ```
 
 ## Library
 
 ```python
-from surfaceome_mining import get_source
+from surfaceome_mining import (
+    ClaudeTriageRunner,
+    GeneContext,
+    deep_dive_genes,
+    format_deep_dive_markdown,
+    get_source,
+)
 from surfaceome_mining.protocol import MineQuery
 
 source = get_source("deliverome", cache_dir=".cache")
 hits = source.mine(MineQuery(preset="canonical", min_db_votes=3, limit=50))
 bundle = source.gene("ERBB2", include=("record", "tag_sites", "internalization"))
+
+# Profile a list of candidate genes (deep-dive + triage + orthologs + tag sites)
+profiles = deep_dive_genes(source, ["Pik3ip1 (cell_surface)", "Slc2a4 (receptor)", "Them4 (plasma_membrane)"])
+print(format_deep_dive_markdown(profiles))
 ```

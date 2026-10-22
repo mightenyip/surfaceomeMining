@@ -10,8 +10,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from surfaceome_mining.deep_dive import (
+    DEFAULT_DEEP_DIVE_INCLUDES,
+    deep_dive_genes,
+    format_deep_dive_markdown,
+    parse_labeled_symbol,
+)
 from surfaceome_mining.protocol import MineQuery
 from surfaceome_mining.registry import get_source, list_sources
+from surfaceome_mining.triage import (
+    ClaudeTriageRunner,
+    GeneContext,
+    format_benchmark_leaderboard,
+    score_benchmark_matrix,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,6 +71,34 @@ def main(argv: list[str] | None = None) -> int:
     )
     mine.add_argument("--refresh", action="store_true", help="Bypass catalog cache")
     mine.add_argument("-o", "--output", type=Path)
+
+    dd = sub.add_parser("deep-dive", parents=[shared], help="Profile a list of candidate genes with deep-dive and triage records")
+    dd.add_argument("--symbols", help="Comma-separated gene symbols (e.g. 'Pik3ip1 (cell_surface),Slc2a4 (receptor)')")
+    dd.add_argument("--symbols-file", type=Path, help="Newline-separated file of gene symbols or 'Symbol (category)' lines")
+    dd.add_argument(
+        "--format",
+        choices=["json", "markdown"],
+        default="markdown",
+        help="Output format (default: markdown)",
+    )
+    dd.add_argument("--title", default="Surfaceome Deep-Dive & Triage Report", help="Report title for markdown output")
+    dd.add_argument("-o", "--output", type=Path)
+
+    bench = sub.add_parser("benchmark", parents=[shared], help="Score or export the 147-gene SurfaceBench multi-model benchmark")
+    bench.add_argument("--model", help="Filter to a specific Claude model (e.g. claude-sonnet-4-6, claude-opus-4-8)")
+    bench.add_argument("--variant", help="Filter to a specific prompt variant (e.g. ncbi, pubmed_ncbi, naive)")
+    bench.add_argument("--format", choices=["json", "markdown"], default="markdown")
+    bench.add_argument("--refresh", action="store_true")
+    bench.add_argument("-o", "--output", type=Path)
+
+    tr = sub.add_parser("triage", parents=[shared], help="Fetch Deliverome triage runs or run live Claude Sonnet/Opus triage")
+    tr.add_argument("symbols", nargs="+", help="One or more gene symbols")
+    tr.add_argument("--run-llm", action="store_true", help="Run live Anthropic Claude triage instead of fetching precomputed runs")
+    tr.add_argument("--model", default="claude-sonnet-4-6", help="Claude model id for --run-llm (default: claude-sonnet-4-6)")
+    tr.add_argument("--variant", default="ncbi", help="Prompt variant for --run-llm (naive, ncbi, pubmed_ncbi)")
+    tr.add_argument("--replicates", type=int, default=1, help="Number of replicates for --run-llm (SurfaceBench uses 3)")
+    tr.add_argument("--context", default=None, help="Optional biological/experimental context for --run-llm (e.g. 'simulated ischemia')")
+    tr.add_argument("-o", "--output", type=Path)
 
     args = parser.parse_args(argv)
     if args.cmd == "sources":
@@ -116,6 +156,70 @@ def main(argv: list[str] | None = None) -> int:
             "genes": [_bundle_dict(g) for g in result.genes],
         }
         _emit(payload, path=args.output)
+        return 0
+
+    if args.cmd == "deep-dive":
+        items: list[tuple[str, str | None]] = []
+        if args.symbols:
+            items.extend(parse_labeled_symbol(s) for s in _split_csv(args.symbols))
+        if args.symbols_file:
+            for line in args.symbols_file.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    items.append(parse_labeled_symbol(line))
+        if not items:
+            parser.error("deep-dive requires --symbols or --symbols-file")
+        profiles = deep_dive_genes(source, items, include=DEFAULT_DEEP_DIVE_INCLUDES)
+        if args.format == "markdown":
+            md = format_deep_dive_markdown(profiles, title=args.title)
+            _emit_text(md, path=args.output)
+        else:
+            _emit([asdict(p) for p in profiles], path=args.output)
+        return 0
+
+    if args.cmd == "benchmark":
+        if not hasattr(source, "benchmark_matrix"):
+            parser.error(f"source {args.source!r} does not support benchmark_matrix")
+        matrix = source.benchmark_matrix(refresh=args.refresh)  # type: ignore[attr-defined]
+        models = [args.model] if args.model else None
+        variants = [args.variant] if args.variant else None
+        scores = score_benchmark_matrix(matrix, models=models, variants=variants)
+        if args.format == "markdown":
+            _emit_text(format_benchmark_leaderboard(scores), path=args.output)
+        else:
+            _emit(
+                {
+                    "bench_version": matrix.get("bench_version"),
+                    "universe_version": matrix.get("universe_version"),
+                    "n_genes": matrix.get("n_genes"),
+                    "scores": [asdict(s) for s in scores],
+                },
+                path=args.output,
+            )
+        return 0
+
+    if args.cmd == "triage":
+        if args.run_llm:
+            runner = ClaudeTriageRunner(model=args.model)
+            try:
+                results = []
+                for sym in args.symbols:
+                    clean_sym, _ = parse_labeled_symbol(sym)
+                    ctx = GeneContext(symbol=clean_sym.upper(), biological_context=args.context)
+                    maj = runner.triage_gene(ctx, variant=args.variant, n_replicates=args.replicates)
+                    results.append(asdict(maj))
+                _emit(results, path=args.output)
+            finally:
+                runner.close()
+        else:
+            if not hasattr(source, "triage"):
+                parser.error(f"source {args.source!r} does not support triage")
+            results = []
+            for sym in args.symbols:
+                clean_sym, _ = parse_labeled_symbol(sym)
+                payload = source.triage(clean_sym)  # type: ignore[attr-defined]
+                results.append(payload or {"gene_symbol": clean_sym.upper(), "count": 0, "runs": []})
+            _emit(results if len(results) > 1 else results[0], path=args.output)
         return 0
 
     parser.error(f"unknown command {args.cmd}")
@@ -200,6 +304,10 @@ def _bundle_dict(bundle: Any) -> dict[str, Any]:
 
 def _emit(payload: Any, path: Path | None = None) -> None:
     text = json.dumps(payload, indent=2, default=_json_default)
+    _emit_text(text, path=path)
+
+
+def _emit_text(text: str, path: Path | None = None) -> None:
     if path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
