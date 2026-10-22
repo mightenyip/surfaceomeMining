@@ -1,0 +1,317 @@
+---
+name: surfaceome-api
+description: Use when the user asks whether a human gene is a cell-surface protein, asks for surface accessibility / drug targetability evidence on a specific gene, mentions SurfaceBench or the 147-gene triage benchmark, or compares LLM triage verdicts against public databases. Reads the public Surfaceome API at api.deliverome.org/surfaceome/v1/* — no auth, CORS open — to fetch deep-dive SurfaceomeRecords, per-source DB votes, and benchmark verdicts.
+---
+
+# Surfaceome API
+
+Read-only public API serving the Deliverome surfaceome catalogue. Base URL: `https://api.deliverome.org/surfaceome/v1/`. No authentication. Generous per-IP rate limits (see **Error responses** for the 429 shape). Edge-cached: 60 s for list/index endpoints, per-gene triage, catalog rows, tag sites and the `.md` briefs; 1 day for per-gene records, evidence, benchmark, orthologs, internalization and the TSV exports; 1 year (immutable) for revision bodies and DOI-published releases.
+
+**Discovery:** `GET /v1` (or the bare service root) returns a self-describing index — every endpoint with its path template, links to this skill / the docs / the `SurfaceomeRecord` schema, and the live dataset versions (`bench_version`, `universe_version`, `n_annotations`). A site-root [`llms.txt`](https://surfaceome.deliverome.org/llms.txt) mirrors the same entry points.
+
+## When to use this skill
+
+Invoke before answering whenever the user:
+
+1. **Asks about a specific human gene's surface biology** ("is ERBB2 a surface protein", "what's the targetability tier on TACSTD2", "give me evidence that CD19 reaches the plasma membrane"). Fetch `/v1/genes/{SYMBOL}` for the full deep-dive record (or `/v1/genes/{SYMBOL}.md` for the same record as a readable Markdown brief), `/v1/genes/{SYMBOL}/evidence` for the cited quotes, or `/v1/catalog/{SYMBOL}` for that gene's five-DB vote summary.
+
+2. **References SurfaceBench or the 147-gene triage benchmark.** Fetch `/v1/benchmark/matrix` — the canonical view that joins ground truth + 5 per-DB flags + per-model LLM verdicts in one payload.
+
+3. **Compares LLM triage variants** (naive vs ncbi vs ncbi at low reasoning effort vs web vs pubmed prompts; eight Claude models across the Haiku, Sonnet and Opus families) on a specific gene. Fetch `/v1/triage/{SYMBOL}` for every run on record.
+
+4. **Asks for orthology data** (mouse, cynomolgus) on a human gene. Fetch `/v1/orthologs/{SYMBOL}`.
+
+5. **Wants the genome-wide DB-vote matrix** for a query like "all genes that 5+ sources call surface". Fetch `/v1/catalog` once and filter client-side. There is no pagination — it is one response of ≈14 MB uncompressed (≈0.5 MB gzipped on the wire), so fetch it once and reuse it rather than calling it per gene; for a single gene use `/v1/catalog/{SYMBOL}`.
+
+Do **not** invoke this skill for non-human genes, for general protein-biology questions that don't reference a specific gene, or for questions that are already answered by domain knowledge without hitting an external service.
+
+## Endpoints
+
+Grouped by scope, in the order you'll usually reach for them: the labeled **benchmark** first, then the **genome-wide** sweep, then the per-gene **deep dive**.
+
+### SurfaceBench (147-gene labeled eval)
+
+| Method | Path | Returns | TTL |
+|---|---|---|---|
+| `GET` | `/v1/benchmark` | 147 ground-truth labels (JSON) for the current bench_version | 1d |
+| `GET` | `/v1/benchmark/export.tsv` | Long-format TSV of the bench-restricted multi-model sweep: one row per (bench gene × model × variant) cell with truth labels + DB votes joined in (34 cols). The verdict is the cell's 3-replicate majority, as in the paper. Flat version of `/v1/benchmark/matrix`. | 1d |
+| `GET` | `/v1/benchmark/{SYMBOL}` | Single gene's truth label | 1d |
+| `GET` | `/v1/benchmark/matrix` | One row per gene: truth + 5 per-DB flags + `verdicts[model][variant]` LLM cells (8 models × up to 5 variants — not every model ran every variant — with reasoning + cost). Each cell is the majority over its 3 replicates (refused replicates excluded), matching the paper. | 1d |
+
+### Genome-wide (19,324 human protein-coding genes)
+
+| Method | Path | Returns | TTL |
+|---|---|---|---|
+| `GET` | `/v1/catalog` | Per-gene-per-source DB-vote matrix (5 DBs) + latest triage verdict + deep-dive flag, plus a `ddf` projection of the filterable deep-dive facets (~1.5 KB per deep-dived row) and a top-level `row_schema` (11 adds an optional per-row `libtopo`: library members with a DeepTMHMM topology for their exact designed sequence). One unpaginated response, ≈14 MB uncompressed / ≈0.5 MB gzipped. | 60s |
+| `GET` | `/v1/catalog/{SYMBOL}` | One gene's slim catalog row: `symbol`, `uniprot`, `n_sources`, `db` (5-DB vote vector), `deep_dive`, `surface_bind_sites`. 404 `gene_not_in_universe` outside the cohort. | 60s |
+| `GET` | `/v1/triage/{SYMBOL}` | Every triage run for one gene — model × variant × replicate, with cost + token counts and the agent's free-text `verdict_reasoning` | 60s |
+| `GET` | `/v1/triage/{SYMBOL}/{model}/{variant}` | Replicate detail for one benchmark cell: every replicate's verdict + reasoning + token usage, plus a computed `majority` object (`verdict`, `reason`, `reasoning`, `confidence`, `n_reps`, `agreement`). **SurfaceBench genes only** — any other gene returns `replicates: []`, `majority: null`. 400 `invalid_model` / `invalid_variant` for an unknown model or variant. | 60s |
+| `GET` | `/v1/triage/export.tsv` | Long-format TSV of every triage run for one `run_id`, with per-source DB votes + `uniprot_acc` joined in server-side. Default `mainbench_canonical_v2` (the multi-model bench sweep); pass `run_id=genome_full_sonnet_ncbi_v2` for the full 19,324-gene Sonnet sweep (the NCBI-context pass). The PubMed-context rescue pass (one pass, 14,404 rows) is recorded under four `run_id`s, one per batch: `genome_full_sonnet_pubmed_ncbi_v1`, `genome_intracellular_pubmed_ncbi_v1`, `genome_1db_trim_pubmed_ncbi_v1`, `genome_optcut_zerodb_pubmed_ncbi_v1`; the Zenodo deposit's `triage-runs-genome-with-reasoning.tsv` combines both passes with a `triage_pass` column. Reasoning columns omitted by default (figure-input exports stay prose-free). | 1d |
+| `GET` | `/v1/triage/export.tsv?…&with_reasoning=1` | Same export **with the agent's reasoning** appended (`predicted_key_uncertainty` + `verdict_reasoning` trailing columns). `with_reasoning=1` works on any `run_id`; use it with `run_id=genome_full_sonnet_ncbi_v2` for the **full genome-wide triage corpus with reasoning** — the bulk counterpart to per-gene `/v1/triage/{SYMBOL}`. | 1d |
+
+### Deep dive (per-gene) & utility
+
+| Method | Path | Returns | TTL |
+|---|---|---|---|
+| `GET` | `/v1` | Self-describing index: endpoint catalogue, path templates, and docs / skill/llms.txt/schema links + live dataset versions. Also served at the bare service root. Hit first to discover the API. | 60s |
+| `GET` | `/v1/health` | `{ ok, n_annotations, cache_epoch }` — liveness; never rate-limited | 60s |
+| `GET` | `/v1/genes` | List of genes with a deep-dive record (summary fields: `gene_symbol`, `uniprot_acc`, `schema_version`, `prompt_corpus_version`, `cohort_run_id`, `confidence`, `triage_signal`, `surface_status`, `annotated_at`) | 60s |
+| `GET` | `/v1/genes/{SYMBOL}` | Full SurfaceomeRecord JSON (see schema below) — **without** the evidence ledger. Preview blocks, attached at serve time and subject to change (not in the manuscript): `deterministic_features.library_designed_topology` (DeepTMHMM 1.0.24 topology of the protein each library member's designed CDS encodes, matched by exact sequence), `deterministic_features.library_designed_structure` (which model to render per library member, with its residue offset) and `deterministic_features.bindome` (binder-design sites recovered from Bindome's BindCraft designs); each present only for genes with data | 1d |
+| `GET` | `/v1/genes/{SYMBOL}/evidence` | The evidence ledger split out of the record: `{ gene, evidence[], papers{} }` — `evidence[]` holds each claim with its verbatim quote spans + source; `papers` is NCBI citation metadata (title, authors, journal, year, PMID/PMCID/DOI) keyed by `source_id` | 1d |
+| `GET` | `/v1/genes/{SYMBOL}.md` | Rich Markdown brief (served from R2): the record as prose plus canonical/isoform/ortholog sequences, per-residue DeepTMHMM topology and AlphaFold links. Symbol matched **exactly** — use the canonical HGNC case; a wrong-case symbol 404s `markdown_not_found` | 60s |
+| `GET` | `/v1/orthologs/{SYMBOL}` | Mouse + cyno orthologs from Ensembl Compara release 115 (genome-wide raw Compara — see note). Any well-formed symbol returns 200; no orthologs → `orthologs: []` | 1d |
+| `GET` | `/v1/internalization/{SYMBOL}` | Full InternalizationRecord: sequence-prior grade (`very_high`…`very_low`) + per-isoform topology/motifs/reasoning under `model_priors[]`, the literature track under `literature`, citation metadata under `papers`. 200 with a `null` body if the gene is not in the cohort. Per-gene grade is also on each `/v1/catalog` row as `intern` | 1d (60s when null) |
+| `GET` | `/v1/tag-sites/{SYMBOL}` | TaggedSitesFile: engineered epitope/tag insertion points (deterministic loop/disorder/terminal + literature-validated) under `sites[]`; 200 with `has_data: false`, `sites: []` when the gene has none; a literature site's optional `position_frame` names the proteoform frame its citation numbered in | 60s |
+| `GET` | `/v1/meta/sizes` | Approximate per-endpoint response sizes, computed live from D1 row counts + `LENGTH(...)` sums. Utility endpoint backing the size badges on the /api docs page. | 60s |
+
+`/v1/orthologs/{SYMBOL}` is the **broad** ortholog view — latest Ensembl Compara for any of ~5k genes with a mouse/cyno ortholog (~90% of the surfaceome), carrying full-length % identity + orthology type + high-confidence flag. The deep-dive record's `deterministic_features.orthologs` is the **deep** view — mouse/cyno canonical only, ECD % identity + projected topology + sequence, but only for genes that have been deep-dived. Use the endpoint for breadth, the record for depth.
+
+### Record history & data releases
+
+Every distinct state the API served for a gene (record, evidence ledger, Markdown export) is archived write-once, with one revision per actual change — numbering starts at **1** for a gene's first archived version; there's no revision 0. Numbered data releases pin a fixed revision per gene. Revision and release bodies never change; cite them by URL, or by the release's Zenodo version DOI.
+
+| Method | Path | Returns | TTL |
+|---|---|---|---|
+| `GET` | `/v1/genes/{SYMBOL}/revisions` | Every archived revision of this gene's served record (newest first), each with a `changed` label (`["first_archived"]`, or whichever of `record`/`evidence`/`markdown` differ from the previous revision) and the releases it belongs to | 60s |
+| `GET` | `/v1/genes/{SYMBOL}/revisions/{n}` | Revision n of the record, byte-for-byte as served; also `/evidence` and `.md` | immutable |
+| `GET` | `/v1/releases` | Numbered data releases with their GitHub tag, Zenodo version DOI, and `api_members` | 60s |
+| `GET` | `/v1/releases/{version}` | One release: metadata + the revision of every gene in it | 60s until published, then immutable |
+| `GET` | `/v1/releases/{version}/genes/{SYMBOL}` | A gene as it was in that release; also `/evidence` and `.md` | immutable |
+
+Release **1.0.0** (the 2026-08-15 Zenodo deposit, DOI `10.5281/zenodo.20805384`) predates per-gene record history and is **Zenodo-only**: `api_members` is `false`, `/v1/releases/1.0.0` returns `members: []` plus an `api_note` pointing at the DOI, and `/v1/releases/1.0.0/genes/{SYMBOL}` 404s `release_not_in_api_history` (DOI in the body) for every gene — those records live only in the Zenodo deposit, never in these history routes.
+
+### Reproducibility replicates
+
+**Not published records** — never use these in place of `/v1/genes/{SYMBOL}`. For the run-to-run reproducibility analysis (Supplementary Figure 16), 50 deep-dive genes drawn at random were re-analysed, and each is held three ways: `published_snapshot` (the published record as served when the study ran), `full_rerun` (the whole pipeline from scratch, same prompts) and `fixed_evidence_replay` (section builders + synthesizer re-run on the published evidence). Every response carries `reproducibility_replicate: true`.
+
+| Method | Path | Returns | TTL |
+|---|---|---|---|
+| `GET` | `/v1/replicates` | Every replicate study with its kinds and genes (metadata only) | 60s |
+| `GET` | `/v1/genes/{SYMBOL}/replicates` | The replicates held for one gene, with a link to each; 404 `no_replicates` if not sampled | 1 day |
+| `GET` | `/v1/genes/{SYMBOL}/replicates/{study}/{kind}` | One replicate record in full (evidence included) under `.record`, plus study / kind / run ids and the shared `deep_dive_tier` | 1 day |
+
+Gene symbols are case-insensitive on the wire (the Worker uppercases them) but the canonical HGNC form is upper-case.
+
+## SurfaceomeRecord shape (per-gene deep-dive)
+
+`schema_version` is `2.14.x` (the record was fully restructured from the
+legacy `v0.5` `targetability`/`surface_biology`/`risk_flags` shape — those
+keys no longer exist). Top-level structure:
+
+- `gene` — `hgnc_symbol`, `hgnc_id`, `uniprot_acc`, `ncbi_gene_id`, `ensembl_gene`, `ensembl_canonical_protein`. Key every downstream lookup on these stable IDs, not the symbol.
+- `triage_signal` / `triage_reasoning` — the **first-pass** Sonnet triage verdict (`likely_accessible` | `possibly_accessible` | `unlikely` | `unknown`) + its prose: the NCBI-context call, made before the deep dive. For the 379 genes the PubMed-context rescue pass reclassified, this still reads the first pass's `unlikely`; their PubMed-pass call is in `/v1/triage/{SYMBOL}` and the triage export.
+- `executive_summary` — `one_paragraph` (human TL;DR), `surface_accessibility` (`high`|`moderate`|`low`|`no`|`uncertain`), `confidence`, `evidence_grade_summary`, `state_dependence`, `subcategory`, `surface_call_reason`, `headline_risks[]`, `accessibility_context_summary`, plus family tags `uniprot_family` / `hgnc_gene_groups[]` / `llm_family`.
+- `filters` — ~35 flat catalog facets for filtering, several paired with a `*_rationale` (e.g. `expression_level`+`expression_level_rationale`, `surface_specificity`+`_rationale`, `has_known_ligand`+`_rationale`): `co_receptor_dependency`, `has_{shed,secreted,epitope_masking,restricted_subdomain}*`, `ecd_accessibility_class`, `evidence_grade`, `evidence_density`, `{mouse,cyno}_ortholog_ecd_pct_identity`, `max_paralog_ecd_pct_identity`, `tumor_associated`, `induction_trigger`, `has_live_cell_surface_evidence`, …
+- `surface_evidence` — `evidence_grade` + `grade_rationale`, `claim_stances[]` (per-claim supports/contradicts + weight), `methods[]` (per-assay: `method_family`, `antibodies[]` with clonality + validation strategy/strength, `expression_observations[]`, `overexpression` construct, `surface_claim_type`, `accessibility_relevance`), `non_surface_expression[]`, `contradicting_evidence[]`.
+- `biological_context` — `expression[]` (unified rows: `tissue` × `cell_type` of origin × `disease_context`/`disease_label` × `present` level, with `cell_states` + `species` + `cited_evidence_ids`; replaces the legacy split `tissues[]`/`cell_types[]`), `cell_states[]`, `subcellular_localization` (`primary_compartment`, `dual_localization[]`, `membrane_subdomains[]`), `anatomical_accessibility[]`, `accessibility_modulation[]`.
+- `accessibility_risks` — `shed_form`, `secreted_form`, `epitope_masking`, `ecd_size_assessment`, `restricted_subdomain`, `co_receptor_requirements`; each with `severity` / `evidence_strength` / `rationale` / `cited_evidence_ids`.
+- `deterministic_features` — tool output, never LLM-written (see below).
+- `evidence_count` / `primary_evidence_count` / `secondary_evidence_count` — ledger sizes. The ledger itself is **not** in the record: fetch `/v1/genes/{SYMBOL}/evidence`, whose `evidence[]` is the primary/secondary chain (`evidence_id`, `claim`, `claim_type`, `direction`, `evidence_tier`, `assay_context` (species / cell / permeabilization), and `spans[]` with verbatim `quote` + `source` (`pmid` / `pmc_id` / `doi` / `url`)), with `papers{}` resolving each `source_id` to its title / authors / journal / year.
+- `confidence` / `confidence_reasoning`, `deep_dive_tier` (`canonical` | `likely` | `low` | `uncertain` | `no`) and `deep_dive_facet` (`induced` | `cell_type_restricted` | null), `prompt_corpus_version`, `model_path`, `record_generated_at`.
+
+### `deterministic_features` — sequences, topology, structure, homology
+
+Populated deterministically (UniProt + DeepTMHMM + Ensembl Compara +
+AlphaFold DB + PDBe SIFTS + SURFACE-Bind), never by the model. Every
+topology entity carries its full amino-acid `sequence` aligned 1:1 with its
+`per_residue_topology` string — so a consumer can index the topology without
+a second fetch:
+
+- `canonical_topology` — `uniprot_acc`, `per_residue_topology` (`M`/`O`/`I`/`S`/`B` per residue), **`sequence`**, `tm_helix_count`, `signal_peptide_length`, `ecd_length_residues`, `icd_length_residues`, `n_/c_terminal_orientation`.
+- `isoform_topologies[]` — same shape per alternative isoform + `{full_length,ecd}_pct_identity_to_canonical` + **`sequence`**.
+- `orthologs.{mouse,cynomolgus}[]` — `ortholog_uniprot_acc`, `ortholog_symbol`, `{full_length,ecd}_pct_identity_to_human_canonical`, projected `per_residue_topology` + **`sequence`**.
+- `paralogs[]` — `paralog_symbol`, `paralog_uniprot_acc`, `{full_length,ecd}_pct_identity`; close paralogs (>80%) additionally carry topology + **`sequence`**.
+- `structure` — `afdb_id`, `afdb_version`, `ecd_mean_plddt`, `ecd_disordered_fraction`, AlphaFold download links **`model_cif_url`** / **`model_pdb_url`** / **`model_pae_url`**, and **`representative_experimental_structure`** (PDBe SIFTS best: `pdb_id`, `chain_id`, `unp_start`/`unp_end`, `resolution_a`, `experimental_method`, `n_experimental_structures`; `null` when no deposited structure).
+- `surface_bind` — SURFACE-Bind MaSIF scoring (Balbi et al. 2026, PMID 41604262): `has_data`, `n_sites`, per-site `sites[]` (`anchor_residue`, `area_a2` BSA, α/β seed counts, `hydrophobicity`), `pdbs[]`.
+- `homo_oligomerization` — predicted homo-oligomer state from the Schweke et al. 2024 atlas: `is_homo_oligomer`, `stoichiometry`, `has_higher_order_complex`, `is_ecd_only`, model filenames (`dimer_pdb_filename`, `complex_pdb_filename`), `source`, `citation`.
+- *Preview blocks (serve-time, may change, not in the manuscript; present only for genes with data):*
+  - `library_designed_topology[]` — DeepTMHMM 1.0.24 topology of the protein each library member's designed CDS actually encodes, matched by exact sequence (`sequence_sha256`; often an isoform rather than the canonical): `candidate_id`, `library`, `per_residue_topology`, `tm_helix_count`, `predicted_surface_membrane`, `topology_acc`, …
+  - `library_designed_structure[]` — which structure to render per library member: `model_url`, `source` (`colabfold` / `alphafold_db`), `residue_offset` (construct residue *i* = model residue *i* + offset), `display_first_model_residue` / `display_last_model_residue`, `is_chosen`, `note`, `mean_plddt`.
+  - `bindome` — binder-design sites recovered from Bindome's BindCraft designs (Wenckstern 2026), kept separate from `surface_bind`.
+
+Older records may lack newer fields — use optional-chaining / `?? null` when reading. A Markdown brief of the full record (with the sequences + per-residue topology embedded) is at `https://api.deliverome.org/surfaceome/v1/genes/{SYMBOL}.md` (exact HGNC case).
+
+
+### Fields filled at serve time
+
+`/v1/genes/{SYMBOL}` serves the stored deep-dive record **plus** values the Worker reads from other public tables on each request (cached at the edge). These can change without the record being re-annotated, which is also why numbered releases archive the *served* JSON. Each source is a public D1 table synced from the project's pipelines:
+
+| Field | What the Worker does | Source |
+|---|---|---|
+| `deep_dive_tier`, `deep_dive_facet` | adds | computed from the record's `filters` with the catalog's tier rules (the same labels `/v1/catalog` shows) |
+| `triage_signal`, `triage_reasoning` | sets from the live first-pass call | `triage_run_public`: the SurfaceBench run's replicate 1 for the 147 benchmark genes, otherwise the genome-wide NCBI-context sweep (`genome_full_sonnet_ncbi_v2`) |
+| `gene.ensembl_canonical_protein` | fills when the record lacks it | `gene_identifier_public` (the HGNC-ID-resolved stable-ID table) |
+| `deterministic_features.canonical_topology` | fills DeepTMHMM's own call (`predicted_surface_membrane`, `predicted_secreted`, `beta_strand_count`, `protein_length`) when stored as null; builds the block if missing | `topology_public` (DeepTMHMM 1.0.24) |
+| `deterministic_features.isoform_topologies`, `paralogs`, `orthologs` | refreshes when the source release is newer than the record's | `topology_public`, Ensembl Compara release 115 tables |
+| `deterministic_features.surface_bind`, `homo_oligomerization` | refreshes / back-fills | SURFACE-Bind tables (Balbi et al. 2026, PMID 41604262); Schweke et al. 2024 homo-oligomer atlas |
+| `accessibility_risks.homo_oligomerization_prediction` | adds, mirroring the homo-oligomer block as an epitope-masking risk | Schweke et al. 2024 homo-oligomer atlas |
+| `deterministic_features.bindome` *(preview)* | adds for genes with data; the block carries its own `source`, `citation` and `release` | `bindome_site_public` |
+| `deterministic_features.library_designed_topology` / `library_designed_structure` *(preview)* | adds for library genes | `library_topology_public` -> `topology_public`; `library_structure_public` |
+
+A response whose enrichment hit a database error carries the `X-Surfaceome-Degraded` header and is never cached; retry it.
+
+## SurfaceBench matrix shape
+
+`/v1/benchmark/matrix` returns:
+
+```jsonc
+{
+  "bench_version": "<sha>",
+  "universe_version": "cu_2026_05_12_post_silentdrop_fix",
+  "generated_at": "<iso8601>",
+  "sources": ["uniprot", "go", "surfy", "cspa", "hpa"],
+  "models": [
+    "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5",
+    "claude-sonnet-5", "claude-opus-5",
+    "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"
+  ],
+  "variants": ["naive", "ncbi", "web_ncbi", "pubmed_ncbi", "ncbi_effort_low"],
+  "headline_variant": "ncbi",
+  "n_genes": 147,
+  "rows": [
+    {
+      "gene_symbol": "CD19",
+      "uniprot_acc": "P15391",
+      "class": "validated_positive",
+      "truth_verdict": "yes" | "contextual" | "no",
+      "truth_signal": "...",
+      "truth_reason": "classical_surface_receptor",
+      "db": { "uniprot": 1, "go": 1, "surfy": 1, "cspa": 1, "hpa": 0 },
+      "n_db_surface": 4,
+      // verdicts[model][variant] — one cell per (model × prompt variant).
+      // The headline number is verdicts[model][headline_variant].
+      "verdicts": {
+        "claude-opus-4-8": {
+          "ncbi": {
+            "verdict": "yes" | "contextual" | "no",
+            "reason": "...", "confidence": "high",
+            "key_uncertainty": "...", "reasoning": "<free-text paragraph>",
+            "correct": 1,
+            "latency_s": 0.0, "n_web_searches": 0, "created_at": "<iso8601>",
+            "error": null, "cost_usd": 0.0,
+            "prompt_tokens": 0, "completion_tokens": 0,
+            "cache_creation_tokens": 0, "cache_read_tokens": 0
+          },
+          "naive": { ... }, "web_ncbi": { ... }, "pubmed_ncbi": { ... }
+        },
+        "claude-sonnet-4-6": { ... }, "claude-haiku-4-5": { ... },
+        // A model that didn't run a variant has null for that cell
+        // (e.g. claude-sonnet-5 ran ncbi only).
+        "claude-sonnet-5": { "ncbi": { ... }, "naive": null, ... },
+        // A cell whose replicates were all declined by the model's
+        // safety classifier: no verdict, error "refusal".
+        "claude-opus-5-5": {
+          "ncbi": { "verdict": null, "reason": null, "error": "refusal", ... },
+          "ncbi_effort_low": { ... }
+        }
+      }
+    }
+  ]
+}
+```
+
+`correct` is 1/0 with `yes ≡ contextual` collapsed (matching D1's `correct` semantics).
+
+Models and variants per model: Haiku 4.5 and Sonnet 4.6 ran `naive`, `ncbi`, `web_ncbi` and `pubmed_ncbi`; Opus 4.8, Haiku 5.5 and Sonnet 5.5 ran `naive` and `ncbi`; Sonnet 5 and Opus 5 ran `ncbi` only; Opus 5.5 ran `ncbi` and `ncbi_effort_low` (the `ncbi` prompt — HGNC + UniProt + NCBI summary — at low reasoning effort). Sonnet 4.6 on `ncbi` is the production triage configuration. Read the `models` / `variants` arrays rather than hard-coding them, since new models are added over time.
+
+A refused call (`verdict: null`, `error: "refusal"`) is not a wrong answer and not a missing run — score it separately, or exclude it, rather than counting it as `no`.
+
+## Conventions
+
+- **Use `cache: "force-cache"` or equivalent** when fetching from a build system (Next.js SSG, etc.). The Worker's caching is on the read path; the client should cooperate.
+- **Verdict-pill colors** in any UI: `yes` → success-green, `contextual` → amber, `no` → maroon. Mirrors the convention used on the surfaceome.deliverome.org site.
+- **Capitalisation:** `verdict` values are lowercase strings (`"yes"`, `"contextual"`, `"no"`), not enums — string-compare exactly.
+- **Missing data:** prefer `?? null` over `?? ""` when a field is absent. `null` is the canonical "no value" in this API.
+
+## Example: fetch a per-gene record
+
+```bash
+curl -s https://api.deliverome.org/surfaceome/v1/genes/ERBB2 \
+  | jq '.gene.hgnc_symbol, .executive_summary.surface_accessibility, .confidence, .executive_summary.one_paragraph'
+```
+
+```javascript
+const res = await fetch(
+  "https://api.deliverome.org/surfaceome/v1/genes/ERBB2",
+  { cache: "force-cache" },
+);
+const record = await res.json();
+console.log(record.executive_summary.one_paragraph);
+// canonical sequence + its per-residue topology travel together:
+const ct = record.deterministic_features.canonical_topology;
+console.log(ct.sequence?.length, ct.per_residue_topology?.length); // equal
+```
+
+```python
+import httpx
+r = httpx.get("https://api.deliverome.org/surfaceome/v1/genes/ERBB2", timeout=15)
+record = r.json()
+print(record["executive_summary"]["surface_accessibility"])
+```
+
+## Example: rebuild the canonical predictions table
+
+`/v1/triage/export.tsv` returns a long-format TSV — the public source of truth for every published figure. Each row carries the per-source DB votes (uniprot/go/surfy/cspa/hpa) and `uniprot_acc` joined from the latest candidate-universe snapshot, so figure scripts don't need a second fetch to compare model verdicts against DB consensus. Reasoning is omitted by default; add `with_reasoning=1` for the agent's `verdict_reasoning` + `predicted_key_uncertainty` columns.
+
+```bash
+curl -s 'https://api.deliverome.org/surfaceome/v1/triage/export.tsv?run_id=mainbench_canonical_v2&replicate=1' \
+  | head -5
+
+# full genome-wide sweep WITH agent reasoning:
+curl -s 'https://api.deliverome.org/surfaceome/v1/triage/export.tsv?run_id=genome_full_sonnet_ncbi_v2&replicate=1&with_reasoning=1' \
+  | head -5
+```
+
+```python
+import pandas as pd
+preds = pd.read_csv(
+    "https://api.deliverome.org/surfaceome/v1/triage/export.tsv"
+    "?run_id=mainbench_canonical_v2&replicate=1",
+    sep="\t",
+)
+# one row per (gene × model × prompt_variant) for the bench sweep
+print(preds.groupby(["model", "prompt_variant"]).size())
+```
+
+## Example: SurfaceBench accuracy
+
+```python
+import httpx
+m = httpx.get("https://api.deliverome.org/surfaceome/v1/benchmark/matrix", timeout=30).json()
+hv = m["headline_variant"]  # "ncbi"
+for model in m["models"]:
+    cells = [r["verdicts"].get(model, {}).get(hv, {}) for r in m["rows"]]
+    correct = sum(1 for c in cells if c.get("correct") == 1)
+    total = sum(1 for c in cells if c.get("verdict"))
+    print(f"{model}: {correct}/{total} = {correct/total:.1%}")
+```
+
+## Error responses
+
+Errors are JSON `{ "error": "<code>" }`. 404s are cached for 60 s; 400s are not cached.
+
+- `400 invalid_symbol` — gene symbol didn't match `[A-Za-z0-9._-]{1,30}` shape
+- `400 invalid_model` / `400 invalid_variant` — `/v1/triage/{SYMBOL}/{model}/{variant}` with a model or prompt variant that isn't in the benchmark matrix (read `models` / `variants` from `/v1/benchmark/matrix`)
+- `400 invalid_version` — a malformed release version in `/v1/releases/{version}…`
+- `404 route_not_found` — no endpoint at that path (check `/v1` for the catalogue)
+- `404 gene_not_annotated` — the gene is not in the deep-dive set; fall back to `/v1/triage/{SYMBOL}` for the triage verdict, or `/v1/catalog/{SYMBOL}` for the DB-vote summary
+- `404 gene_not_in_universe` — `/v1/catalog/{SYMBOL}` for a symbol outside the 19,324-gene protein-coding cohort
+- `404 markdown_not_found` — no Markdown brief for that exact symbol (check the HGNC case)
+- `404 not_in_benchmark` — gene isn't one of the 147 benchmark proteins
+- `404 no_replicates` — `/v1/genes/{SYMBOL}/replicates` for a gene that wasn't sampled for the reproducibility study
+- `404 release_not_found` — no data release with that version
+- `404 release_not_in_api_history` — the release (1.0.0) is Zenodo-only; the body carries its `zenodo_version_doi`
+- `404 gene_not_in_release` — the gene isn't a member of that release
+- `405 method_not_allowed` — non-GET on a GET endpoint
+- `429 rate_limited` — over the per-IP rate limit. Reads are limited per client IP; the limits are generous and tighter on the heavy endpoints (`/v1/catalog`, every `*.tsv` export, `/v1/releases/{version}`); `/v1/health` is never limited. The response carries `Retry-After: 60` — wait that long, then retry. Pace bulk work (a couple of requests per second) and prefer `/v1/catalog` or the TSV exports over thousands of per-gene calls.
+
+A 200 response whose server-side enrichment hit a transient error carries `X-Surfaceome-Degraded` (comma-separated list of possibly stale/null fields) and `Cache-Control: no-store` — retry rather than caching it.
+
+## Provenance
+
+- Discovery index: `https://api.deliverome.org/surfaceome/v1` · site-root agent guide: `https://surfaceome.deliverome.org/llms.txt`
+- Source repo: `https://github.com/Deliverome-Project/accessible-surfaceome`
+- Worker source: `cloudflare/workers/surfaceome_api/src/index.js`
+- D1 schema: `cloudflare/d1_public_schema.sql`
+- Per-gene records validate against the `SurfaceomeRecord` Pydantic schema at `src/accessible_surfaceome/tools/_shared/models.py`. The viewer at https://surfaceome.deliverome.org renders the same records as HTML pages.
+- Citation & licence: data is CC0 1.0 — cite the data concept DOI `10.5281/zenodo.20805383` (or a numbered release's version DOI from `/v1/releases`); code is MIT — `10.5281/zenodo.22116981`.
