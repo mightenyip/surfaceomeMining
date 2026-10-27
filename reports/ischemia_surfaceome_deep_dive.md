@@ -168,3 +168,65 @@ ANTHROPIC_API_KEY="sk-ant-..." surfaceome-mine triage SLC2A4 PDIA3 THEM4 \
   --replicates 3 \
   --context "simulated myocardial/skeletal ischemia"
 ```
+
+---
+
+## 5. *In Silico* Stress-Test & Pugh-Chart Scorecard for MI Reperfusion Border-Zone Anchoring
+
+### Definitions: ECD & pLDDT
+- **ECD (Extracellular Domain):** The portion(s) of a membrane protein that protrude outside the plasma membrane into the extracellular space (measured in amino acid residues, `aa`). For a single-pass transmembrane protein (like `BCAM` or `DDR1`), this is one continuous ectodomain; for a multi-pass channel/transporter (like `SLC2A4` or `KCNQ4`), it is the sum of the short loops connecting transmembrane helices on the outer face. *In silico* protein/antibody design requires sufficient exposed ECD surface area (typically $>150\text{ aa}$ for standard antibodies, or well-ordered loops for nanobodies/peptides).
+- **pLDDT (predicted Local Distance Difference Test):** AlphaFold2's per-residue confidence score ($0\text{--}100$) averaged across the ECD (`ecd_mean_plddt`), which strongly correlates with structural rigidity vs. intrinsic disorder:
+  - **$\text{pLDDT} \ge 90$:** Very high confidence; rigid, well-folded 3D backbone ideal for structure-based *in silico* docking and *de novo* binder design (RFdiffusion / BindCraft).
+  - **$70 \le \text{pLDDT} < 90$:** Confident backbone fold; suitable for binder design.
+  - **$\text{pLDDT} < 70$ (or high `Disord%`):** Flexible or intrinsically disordered region; high entropic penalty makes rigid *in silico* docking unreliable.
+
+### Raw Stress-Test Metrics Across the 15 Surface Candidates ([scripts/stress_test_15.py](file:///Users/mightenyip/Documents/GitHub/surfaceomeMining/scripts/stress_test_15.py))
+
+```text
+Gene     | Tier      | TM | ECD(aa) | pLDDT | Disord% | SBind | PDBs | Shed/Sec  | Intern.  | Paralog% | MouseECD%
+------------------------------------------------------------------------------------------------------------------
+BCAM     | canonical |  1 |     520 |  90.4 |    3.5% |     2 |    2 | Shed+Sec  | moderate |    31.9% |     72.7%
+SLC2A4   | likely    | 12 |      71 |  87.0 |    0.0% |     0 |    0 | Clean     | moderate |    59.2% |     85.1%
+DDR1     | canonical |  1 |     397 |  85.5 |   15.1% |     3 |   33 | Shed+Sec  | high     |    50.1% |     92.7%
+CD46     | canonical |  1 |     311 |  87.1 |   17.7% |     3 |    6 | Shed+Sec  | moderate |    31.5% |     None 
+KCNQ4    | canonical |  6 |      56 |  91.4 |    5.4% |     0 |    0 | Clean     | moderate |    78.6% |    100.0%
+IFNGR2   | canonical |  1 |     227 |  92.9 |    4.8% |     3 |    3 | Clean     | moderate |    30.8% |     55.1%
+PIK3IP1  | canonical |  1 |     151 |  64.3 |   55.6% |     1 |    0 | Shed      | moderate |    14.0% |     76.3%
+CACNA1S  | likely    | 24 |     461 |  85.8 |    8.9% |     0 |    0 | Clean     | moderate |    67.0% |     94.1%
+MOSMO    | canonical |  4 |      64 |  85.1 |   12.5% |     0 |    0 | Clean     | moderate |    0.0%  |    100.0%
+PDIA3    | likely    |  0 |     481 |  93.4 |    2.7% |     0 |    0 | Secr      | low      |    35.0% |     93.8%
+CTSD     | likely    |  0 |     392 |  86.8 |   14.5% |     0 |    0 | Secr      | very_low |    47.5% |     83.7%
+FREM2    | likely    |  1 |    3064 |  72.8 |   28.1% |     6 |    0 | Shed      | low      |    40.6% |     89.1%
+TMEM131L | likely    |  1 |     834 |  70.3 |   39.2% |     5 |    0 | Clean     | moderate |    26.9% |     82.9%
+ADAM32   | likely    |  1 |     666 |  82.4 |   17.9% |     3 |    0 | Clean     | moderate |    43.8% |     60.9%
+CATSPER2 | likely    |  6 |      75 |  85.0 |    5.3% |     0 |    0 | Clean     | moderate |    28.0% |     70.9%
+```
+
+### Pugh-Chart Decision Matrix: Anchor to Healthy / Viable Peri-Infarct Cells During MI Reperfusion
+
+**Scoring Key:**Each criterion is scored relative to a baseline reference (`0` = neutral/acceptable, `+1` = favorable, `+2` = ideal, `-1` = unfavorable, `-2` = disqualifying bottleneck), weighted by importance for **anchoring a cytoprotective therapeutic to healthy/viable peri-infarct myocardium or coronary microvasculature surrounding infarcted cells**:
+1. **Healthy / Peri-Infarct Border-Zone Trajectory (Weight 3$\times$):** High in Bin 0 (healthy baseline) and/or Bins 2–3 (viable ischemic border zone), and *downregulated* in Bin 4 (dead infarct core) so the drug anchors to salvageable cells rather than necrotic debris.
+2. **Cardiovascular / Myocardial Expression (Weight 3$\times$):** Expressed on cardiomyocytes, coronary microvascular endothelium, or arterial smooth muscle.
+3. ***In Silico* Binder Druggability (Weight 2$\times$):** Large, rigid ECD ($\text{pLDDT} > 85$, low disorder), experimental PDB structures, and validated SURFACE-Bind pockets.
+4. **Low Soluble Sink / Shedding Risk (Weight 2$\times$):** Absence of circulating decoy protein, or presence of a non-shed membrane-proximal stalk domain.
+5. **Surface Retention vs. Rapid Clearance (Weight 1$\times$):** Low-to-moderate internalization keeps the protective payload anchored at the cell membrane or pericellular space.
+6. **Paralog Selectivity & Preclinical Mouse Conservation (Weight 1$\times$):** Low paralog ECD identity ($<50\%$) to avoid off-target binding, and high mouse ECD identity ($>70\%$) for *in vivo* mouse LAD ischemia-reperfusion validation.
+
+| Gene | 1. Healthy / Border-Zone Trajectory (3$\times$) | 2. Cardiac / Vascular Expression (3$\times$) | 3. *In Silico* Druggability: ECD, pLDDT, PDBs (2$\times$) | 4. Low Soluble Decoy Risk (2$\times$) | 5. Surface Retention (1$\times$) | 6. Selectivity & Mouse Ortho (1$\times$) | **Weighted Total** | Rank & Verdict for MI Reperfusion Anchor |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|---:|---|
+| **BCAM** | **+2** (Peak Bin 0 healthy; lost in infarct) | **+1** (Coronary/vascular endothelium) | **+2** (520 aa, pLDDT 90.4, 2 PDBs, 2 SBind) | **-1** (ADAM10 shed; target Ig4–5 stalk) | **+1** (`moderate` intern.) | **+1** (31.9% paralog, 72.7% mouse) | **+13** | **#1 Best Overall for *De Novo* Protein/mAb Design** (Coronary microvascular endothelial anchor) |
+| **SLC2A4** (GLUT4) | **+2** (Bin 0 + strong Bins 2–3 viable ischemic border zone) | **+2** (Cardiomyocyte sarcolemma) | **-1** (71 aa across 12-TM loops, N57 glycan) | **+2** (Zero shedding/secretion) | **+1** (Regulated cycling) | **+1** (59.2% SLC2A1, 85.1% mouse) | **+13** | **#1 (Tied) Best Cardiomyocyte-Specific Anchor** (Requires loop-specific nanobody/peptide) |
+| **KCNQ4** | **+1** (Peak Bin 2 mid-ischemia border zone; low Bin 4) | **+1** (Coronary/arterial smooth muscle & endothelium; *mito in CM*) | **-1** (56 aa across 6-TM loops, pLDDT 91.4) | **+2** (Zero shedding) | **+1** (`moderate` intern.) | **0** (78.6% KCNQ5 paralog, 100% mouse) | **+8** | **#3 Arterial / Microvascular Tone Anchor** (Small loop target; watch KCNQ5 cross-reactivity) |
+| **CD46** | **+2** (Peak Bin 0 healthy; shed in infarct) | **+1** (Endothelium + all nucleated cells) | **+2** (311 aa, pLDDT 87.1, 6 PDBs, 3 SBind) | **-1** (MMP-1 sheds sCD46 in ACS plasma) | **+1** (`moderate` intern.) | **-2** (Pan-tissue sink; **no mouse ortholog**) | **+7** | **#4 Biologically Ideal (Complement Regulator) but Preclinically Blocked** (No mouse ortholog; systemic sink) |
+| **DDR1** | **-1** (Low Bin 0; spikes in Bin 4 terminal infarct) | **+1** (Vascular smooth muscle & endothelium) | **+2** (397 aa, pLDDT 85.5, 33 PDBs, 3 SBind) | **-1** (MT1-MMP shedding) | **-1** (`high` intern. clears surface) | **+1** (50.1% DDR2, 92.7% mouse) | **+2** | **#5 Best for Late-Infarct Intracellular Delivery (ADC/Degrader)**, not healthy-cell surface anchoring |
+| **IFNGR2** | **-1** (Low Bin 0; spikes in Bin 4 terminal infarct) | **+1** (Endothelium & myeloid cells) | **+2** (227 aa, pLDDT 92.9, 3 PDBs, 3 SBind) | **+2** (No shedding) | **0** (Rapid LI-motif endocytosis) | **0** (30.8% paralog, only 55.1% mouse) | **+4** | **#6 Late Inflammatory Marker** (Peaks in terminal infarct rather than healthy cells) |
+| **PIK3IP1** | **-1** (Low Bin 0; spikes in Bin 4 terminal infarct) | **0** (Mainly T cells / liver; low cardiac surface proof) | **-1** (151 aa, low pLDDT 64.3, 55.6% disordered) | **-1** (ADAM shedding) | **+1** (`moderate` intern.) | **+2** (14.0% paralog, 76.3% mouse) | **-2** | **#7 Poor Structural Rigidity** (55.6% disordered ECD; terminal Bin 4 peak) |
+| **CACNA1S** | **-1** (Low Bin 0–2; spikes in Bin 3–4) | **-1** (Skeletal muscle Cav1.1; cardiac uses CACNA1C) | **0** (461 aa across 24-TM loops, pLDDT 85.8) | **+2** (Clean) | **+1** (`moderate` intern.) | **0** (67% CACNA1D, 94.1% mouse) | **-1** | **#8 Wrong Isoform for Heart** (Skeletal muscle restricted; heart uses Cav1.2) |
+| **PDIA3** | **-1** (Spikes in Bin 4 dying/stressed cells) | **0** (ER resident; surface DAMP on injured cells/platelets) | **0** (481 aa, pLDDT 93.4, 0 TM anchor) | **-1** (Secreted under stress) | **+1** (`low` intern.) | **+1** (35.0% P4HB, 93.8% mouse) | **-3** | **#9 Injured-Cell DAMP Marker** (Targets dying Bin 4 cells, not healthy cells) |
+| **MOSMO** | **-1** (Peaks in Bin 2 & Bin 4) | **-1** (Developmental/ciliary; no cardiac enrichment) | **-1** (64 aa across 4-TM loops, MEGF8-masked) | **+2** (Clean) | **+1** (`moderate` intern.) | **+2** (No paralogs, 100% mouse) | **-3** | **#10 Ciliary / MEGF8-Masked** |
+| **CTSD** | **0** (Mixed Bin 1 & Bin 4) | **-1** (Lysosomal protease) | **-1** (0 TM; receptor-tethered pro-enzyme) | **-2** (High free plasma pro-CTSD decoy) | **+1** (`very_low` intern.) | **+1** (47.5% NAPSA, 83.7% mouse) | **-6** | **#11 Disqualified by Soluble Plasma Sink** |
+| **FREM2** | **0** (Bin 1 & Bin 3) | **-2** (Basement membrane ECM; GSC surface only) | **0** (3064 aa, pLDDT 72.8, 6 SBind) | **-1** (Furin shed; ECM-buried) | **+1** (`low` intern.) | **+1** (40.6% FREM3, 89.1% mouse) | **-6** | **#12 Inaccessible Basement Membrane ECM** |
+| **TMEM131L**| **-1** (Spikes in Bin 4) | **-2** (Immature thymocyte restricted) | **0** (834 aa, pLDDT 70.3, 39.2% disordered) | **+2** (Clean) | **+1** (`moderate` intern.) | **+1** (26.9% TMEM131, 82.9% mouse) | **-5** | **#13 Thymocyte-Restricted** |
+| **ADAM32** | **-1** (Spikes in Bin 4) | **-2** (Sperm/testis restricted) | **+1** (666 aa, pLDDT 82.4, 3 SBind) | **+2** (Clean) | **+1** (`moderate` intern.) | **0** (43.8% ADAM18, 60.9% mouse) | **-5** | **#14 Sperm-Restricted** |
+| **CATSPER2**| **0** (Bin 2–3) | **-2** (Sperm flagellum restricted) | **-2** (75 aa, masked by CATSPER$\varepsilon$ canopy) | **+2** (Clean) | **+1** (`moderate` intern.) | **+1** (28% CATSPER3, 70.9% mouse) | **-4** | **#15 Sperm-Restricted & Canopy-Masked** |
+
