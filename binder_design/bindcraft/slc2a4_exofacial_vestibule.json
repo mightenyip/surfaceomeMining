@@ -1,0 +1,13 @@
+{
+  "design_path": "./results/slc2a4_vestibule",
+  "binder_name": "SLC2A4_GLUT4_Vestibule",
+  "starting_pdb": "./structures/AF-P14672-F1-model_v6.pdb",
+  "chains": "A",
+  "target_hotspot_residues": "A66,A68,A77,A193,A195,A198,A311,A314,A317",
+  "lengths": [
+    55,
+    95
+  ],
+  "number_of_final_designs": 50,
+  "_notes": "Targets the glycan-clear exofacial vestibule of GLUT4 (EL1 G65-W81 + EL3 G191-L201 + EL4 Y309-P322), staying >12 A clear of the N57 glycosylation site. 90%+ conserved in Mouse Slc2a4."
+}

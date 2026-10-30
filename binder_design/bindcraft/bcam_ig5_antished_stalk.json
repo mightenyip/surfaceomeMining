@@ -1,0 +1,13 @@
+{
+  "design_path": "./results/bcam_ig5_stalk",
+  "binder_name": "BCAM_Ig5_Stalk",
+  "starting_pdb": "./structures/AF-P50895-F1-model_v6.pdb",
+  "chains": "A",
+  "target_hotspot_residues": "A341,A345,A348,A507,A509,A511,A513,A535,A537",
+  "lengths": [
+    65,
+    110
+  ],
+  "number_of_final_designs": 50,
+  "_notes": "Targets membrane-proximal Ig3 linker (D341-L350, pLDDT=90.3) and Ig5 beta-sheet stalk (K507-V539) to selectively anchor to intact, uncleaved BCAM on healthy border-zone cells."
+}

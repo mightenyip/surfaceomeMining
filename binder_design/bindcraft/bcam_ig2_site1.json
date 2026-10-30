@@ -1,0 +1,13 @@
+{
+  "design_path": "./results/bcam_ig2_site1",
+  "binder_name": "BCAM_Ig2_Site1",
+  "starting_pdb": "./structures/AF-P50895-F1-model_v6.pdb",
+  "chains": "A",
+  "target_hotspot_residues": "A168,A179,A181,A183,A185,A187,A190,A193",
+  "lengths": [
+    65,
+    120
+  ],
+  "number_of_final_designs": 50,
+  "_notes": "Targets Deliverome SURFACE-Bind Site 1 (anchor V181 in Ig2 domain). 93.3% identical between Human and Mouse across P181-P195 (PKITWYRNGQRLEVP)."
+}
